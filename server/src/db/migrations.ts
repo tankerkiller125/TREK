@@ -2229,6 +2229,26 @@ function runMigrations(db: Database.Database): void {
       db.exec(`ALTER TABLE schema_version_new RENAME TO schema_version`)
       db.exec(`UPDATE app_settings SET value = '${process.env.APP_VERSION || '3.0.15'}' WHERE key = 'app_version'`);
     },
+    // Persistent cache for Nearby search results — shared across users, keyed
+    // by quantized coordinates + category + radius + lang + provider. Both
+    // Google Places and OpenStreetMap (Overpass) results flow through here so
+    // repeated clicks on the same pin don't re-hit upstream APIs.
+    () => {
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS nearby_search_cache (
+          lat_q       REAL    NOT NULL,
+          lng_q       REAL    NOT NULL,
+          radius_m    INTEGER NOT NULL,
+          category    TEXT    NOT NULL,
+          lang        TEXT    NOT NULL DEFAULT '',
+          source      TEXT    NOT NULL,
+          payload_json TEXT   NOT NULL,
+          fetched_at  INTEGER NOT NULL,
+          PRIMARY KEY (lat_q, lng_q, radius_m, category, lang, source)
+        )
+      `).run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_nearby_search_cache_fetched_at ON nearby_search_cache(fetched_at)').run();
+    },
   ];
 
   if (currentVersion < migrations.length) {

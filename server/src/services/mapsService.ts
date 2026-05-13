@@ -508,6 +508,76 @@ async function searchNearbyOverpass(
   }
 }
 
+// Cache TTL for nearby results — 24h is short enough for ratings drift but
+// long enough to dedupe back-to-back clicks on the same pin.
+const NEARBY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function quantizeCoord(n: number): number {
+  // 6 decimal places ≈ 0.11m precision — preserves uniqueness for distinct
+  // stored places while normalising float repr noise.
+  return Math.round(n * 1e6) / 1e6;
+}
+
+function readNearbyCache(
+  lat: number,
+  lng: number,
+  radius: number,
+  category: NearbyCategoryKey,
+  lang: string,
+  source: 'google' | 'openstreetmap',
+): NearbyResult[] | null {
+  try {
+    const row = db.prepare(
+      'SELECT payload_json, fetched_at FROM nearby_search_cache WHERE lat_q = ? AND lng_q = ? AND radius_m = ? AND category = ? AND lang = ? AND source = ?',
+    ).get(quantizeCoord(lat), quantizeCoord(lng), radius, category, lang, source) as { payload_json: string; fetched_at: number } | undefined;
+    if (!row) return null;
+    if (Date.now() - row.fetched_at > NEARBY_CACHE_TTL_MS) return null;
+    return JSON.parse(row.payload_json) as NearbyResult[];
+  } catch (err) {
+    console.error('nearby cache read failed:', err);
+    return null;
+  }
+}
+
+function writeNearbyCache(
+  lat: number,
+  lng: number,
+  radius: number,
+  category: NearbyCategoryKey,
+  lang: string,
+  source: 'google' | 'openstreetmap',
+  results: NearbyResult[],
+): void {
+  try {
+    db.prepare(
+      'INSERT OR REPLACE INTO nearby_search_cache (lat_q, lng_q, radius_m, category, lang, source, payload_json, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      quantizeCoord(lat), quantizeCoord(lng), radius, category, lang, source,
+      JSON.stringify(results), Date.now(),
+    );
+  } catch (err) {
+    console.error('nearby cache write failed:', err);
+  }
+}
+
+async function fetchNearbyWithCache(
+  apiKey: string | null,
+  lat: number,
+  lng: number,
+  category: NearbyCategoryKey,
+  radius: number,
+  lang: string,
+  source: 'google' | 'openstreetmap',
+): Promise<NearbyResult[]> {
+  const cached = readNearbyCache(lat, lng, radius, category, lang, source);
+  if (cached) return cached;
+  const results = source === 'google' && apiKey
+    ? await searchNearbyGoogle(apiKey, lat, lng, category, radius, lang)
+    : await searchNearbyOverpass(lat, lng, category, radius);
+  writeNearbyCache(lat, lng, radius, category, lang, source, results);
+  return results;
+}
+
 export async function searchNearby(
   userId: number,
   lat: number,
@@ -516,6 +586,7 @@ export async function searchNearby(
   lang?: string,
 ): Promise<{ results: NearbyResult[]; source: 'google' | 'openstreetmap'; radius_m: number }> {
   const apiKey = getMapsKey(userId);
+  const langKey = lang || 'en';
   const radii = [500, 2000];
   const minResults = 5;
   let lastResults: NearbyResult[] = [];
@@ -525,22 +596,21 @@ export async function searchNearby(
   for (let i = 0; i < radii.length; i++) {
     const radius = radii[i];
     const isLast = i === radii.length - 1;
+    const source: 'google' | 'openstreetmap' = apiKey && !googleFailed ? 'google' : 'openstreetmap';
     try {
-      const results = apiKey && !googleFailed
-        ? await searchNearbyGoogle(apiKey, lat, lng, category, radius, lang)
-        : await searchNearbyOverpass(lat, lng, category, radius);
+      const results = await fetchNearbyWithCache(apiKey, lat, lng, category, radius, langKey, source);
       lastResults = results;
-      lastSource = apiKey && !googleFailed ? 'google' : 'openstreetmap';
+      lastSource = source;
       if (results.length >= minResults || isLast) {
-        return { results, source: lastSource, radius_m: radius };
+        return { results, source, radius_m: radius };
       }
     } catch (err) {
-      console.error(`searchNearby (${apiKey && !googleFailed ? 'google' : 'overpass'}) failed at ${radius}m:`, err);
+      console.error(`searchNearby (${source}) failed at ${radius}m:`, err);
       // Google failure → switch permanently to Overpass for remaining retries
-      if (apiKey && !googleFailed) {
+      if (source === 'google') {
         googleFailed = true;
         try {
-          const results = await searchNearbyOverpass(lat, lng, category, radius);
+          const results = await fetchNearbyWithCache(apiKey, lat, lng, category, radius, langKey, 'openstreetmap');
           lastResults = results;
           lastSource = 'openstreetmap';
           if (results.length >= minResults || isLast) {
