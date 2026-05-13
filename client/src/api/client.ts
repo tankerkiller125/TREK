@@ -444,6 +444,8 @@ export const mapsApi = {
   placePhoto: (placeId: string, lat?: number, lng?: number, name?: string) => apiClient.get(`/maps/place-photo/${encodeURIComponent(placeId)}`, { params: { lat, lng, name } }).then(r => r.data),
   reverse: (lat: number, lng: number, lang?: string) => apiClient.get('/maps/reverse', { params: { lat, lng, lang } }).then(r => r.data),
   resolveUrl: (url: string) => apiClient.post('/maps/resolve-url', { url }).then(r => r.data),
+  nearby: (lat: number, lng: number, category: string, lang?: string) =>
+      apiClient.post('/maps/nearby', { lat, lng, category, lang }).then(r => r.data),
 }
 
 export const airportsApi = {

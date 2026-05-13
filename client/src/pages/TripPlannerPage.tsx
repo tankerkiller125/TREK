@@ -11,6 +11,8 @@ import PlacesSidebar from '../components/Planner/PlacesSidebar'
 import PlaceInspector from '../components/Planner/PlaceInspector'
 import DayDetailPanel from '../components/Planner/DayDetailPanel'
 import PlaceFormModal from '../components/Planner/PlaceFormModal'
+import NearbyModal, { type NearbyResult } from '../components/Map/NearbyModal'
+import { resolveCategoryId } from '../components/Map/nearbyCategories'
 import TripFormModal from '../components/Trips/TripFormModal'
 import SlidingTabs from '../components/shared/SlidingTabs'
 import TripMembersModal from '../components/Trips/TripMembersModal'
@@ -259,7 +261,12 @@ export default function TripPlannerPage(): React.ReactElement | null {
   const [dayDetailCollapsed, setDayDetailCollapsed] = useState(false)
   const [showPlaceForm, setShowPlaceForm] = useState<boolean>(false)
   const [editingPlace, setEditingPlace] = useState<Place | null>(null)
-  const [prefillCoords, setPrefillCoords] = useState<{ lat: number; lng: number; name?: string; address?: string } | null>(null)
+  const [prefillCoords, setPrefillCoords] = useState<{
+    lat: number; lng: number; name?: string; address?: string;
+    google_place_id?: string | null; osm_id?: string | null; category_id?: number | null;
+    website?: string | null; phone?: string | null;
+  } | null>(null)
+  const [nearbyForPlace, setNearbyForPlace] = useState<Place | null>(null)
   const [editingAssignmentId, setEditingAssignmentId] = useState<number | null>(null)
   const [showTripForm, setShowTripForm] = useState<boolean>(false)
   const [showMembersModal, setShowMembersModal] = useState<boolean>(false)
@@ -1031,6 +1038,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
                 onDelete={() => handleDeletePlace(selectedPlace.id)}
                 onAssignToDay={handleAssignToDay}
                 onRemoveAssignment={handleRemoveAssignment}
+                onOpenNearby={() => setNearbyForPlace(selectedPlace)}
                 files={files}
                 onFileUpload={canUploadFiles ? (fd) => tripActions.addFile(tripId, fd) : undefined}
                 tripMembers={tripMembers}
@@ -1080,6 +1088,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
                     onDelete={() => { handleDeletePlace(selectedPlace.id); setSelectedPlaceId(null) }}
                     onAssignToDay={handleAssignToDay}
                     onRemoveAssignment={handleRemoveAssignment}
+                    onOpenNearby={() => { setNearbyForPlace(selectedPlace); setSelectedPlaceId(null) }}
                     files={files}
                     onFileUpload={canUploadFiles ? (fd) => tripActions.addFile(tripId, fd) : undefined}
                     tripMembers={tripMembers}
@@ -1198,6 +1207,28 @@ export default function TripPlannerPage(): React.ReactElement | null {
       </div>
 
       <PlaceFormModal isOpen={showPlaceForm} onClose={() => { setShowPlaceForm(false); setEditingPlace(null); setEditingAssignmentId(null); setPrefillCoords(null) }} onSave={handleSavePlace} place={editingPlace} prefillCoords={prefillCoords} assignmentId={editingAssignmentId} dayAssignments={editingAssignmentId ? Object.values(assignments).flat() : []} tripId={tripId} categories={categories} onCategoryCreated={cat => tripActions.addCategory?.(cat)} />
+      {nearbyForPlace && (
+        <NearbyModal
+          place={nearbyForPlace}
+          onClose={() => setNearbyForPlace(null)}
+          onPick={(result: NearbyResult, categoryKey: string) => {
+            setNearbyForPlace(null)
+            if (result.lat == null || result.lng == null) return
+            setEditingPlace(null)
+            setEditingAssignmentId(null)
+            setPrefillCoords({
+              lat: result.lat,
+              lng: result.lng,
+              name: result.name,
+              address: result.address,
+              google_place_id: result.google_place_id,
+              osm_id: result.osm_id,
+              category_id: resolveCategoryId(categories, categoryKey),
+            })
+            setShowPlaceForm(true)
+          }}
+        />
+      )}
       <TripFormModal isOpen={showTripForm} onClose={() => setShowTripForm(false)} onSave={async (data) => { await tripActions.updateTrip(tripId, data); toast.success(t('trip.toast.tripUpdated')) }} trip={trip} />
       <TripMembersModal isOpen={showMembersModal} onClose={() => setShowMembersModal(false)} tripId={tripId} tripTitle={trip?.title} />
       <ReservationModal isOpen={showReservationModal} onClose={() => { setShowReservationModal(false); setEditingReservation(null); setBookingForAssignmentId(null) }} onSave={handleSaveReservation} reservation={editingReservation} days={days} places={places} assignments={assignments} selectedDayId={selectedDayId} files={files} onFileUpload={canUploadFiles ? (fd) => tripActions.addFile(tripId, fd) : undefined} onFileDelete={(id) => tripActions.deleteFile(tripId, id)} accommodations={tripAccommodations} defaultAssignmentId={bookingForAssignmentId} />

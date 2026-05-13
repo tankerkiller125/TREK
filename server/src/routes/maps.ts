@@ -9,7 +9,9 @@ import {
   reverseGeocode,
   resolveGoogleMapsUrl,
   autocompletePlaces,
+  searchNearby,
 } from '../services/mapsService';
+import { isNearbyCategoryKey } from '../services/nearbyCategoryMap';
 import { db } from '../db/database';
 import { serveFilePath } from '../services/placePhotoCache';
 
@@ -29,6 +31,31 @@ router.post('/search', authenticate, async (req: Request, res: Response) => {
     const status = (err as { status?: number }).status || 500;
     const message = err instanceof Error ? err.message : 'Search error';
     console.error('Maps search error:', err);
+    res.status(status).json({ error: message });
+  }
+});
+
+// POST /nearby
+router.post('/nearby', authenticate, async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+  const { lat, lng, category, lang } = req.body as { lat?: unknown; lng?: unknown; category?: unknown; lang?: unknown };
+
+  const latNum = typeof lat === 'number' ? lat : Number(lat);
+  const lngNum = typeof lng === 'number' ? lng : Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum) || latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
+    return res.status(400).json({ error: 'Valid lat and lng required' });
+  }
+  if (typeof category !== 'string' || !isNearbyCategoryKey(category)) {
+    return res.status(400).json({ error: 'Unknown category' });
+  }
+
+  try {
+    const result = await searchNearby(authReq.user.id, latNum, lngNum, category, typeof lang === 'string' ? lang : undefined);
+    res.json(result);
+  } catch (err: unknown) {
+    const status = (err as { status?: number }).status || 500;
+    const message = err instanceof Error ? err.message : 'Nearby search error';
+    console.error('Maps nearby error:', err);
     res.status(status).json({ error: message });
   }
 });

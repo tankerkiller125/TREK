@@ -1,6 +1,7 @@
 import { db } from '../db/database';
 import { decrypt_api_key } from './apiKeyCrypto';
 import { checkSsrf } from '../utils/ssrfGuard';
+import { NEARBY_CATEGORY_MAP, type NearbyCategoryKey } from './nearbyCategoryMap';
 
 // ── Google API call counter ───────────────────────────────────────────────────
 
@@ -361,6 +362,200 @@ export async function searchPlaces(userId: number, query: string, lang?: string)
   }));
 
   return { places, source: 'google' };
+}
+
+// ── Nearby search (Google or Overpass fallback) ─────────────────────────────
+
+export interface NearbyResult {
+  google_place_id: string | null;
+  osm_id: string | null;
+  name: string;
+  address: string;
+  lat: number | null;
+  lng: number | null;
+  rating: number | null;
+  distance_m: number | null;
+  types: string[];
+  source: 'google' | 'openstreetmap';
+}
+
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+async function searchNearbyGoogle(
+  apiKey: string,
+  lat: number,
+  lng: number,
+  category: NearbyCategoryKey,
+  radius: number,
+  lang?: string,
+): Promise<NearbyResult[]> {
+  const body = {
+    includedTypes: NEARBY_CATEGORY_MAP[category].google,
+    maxResultCount: 20,
+    locationRestriction: {
+      circle: { center: { latitude: lat, longitude: lng }, radius },
+    },
+    languageCode: lang || 'en',
+    rankPreference: 'DISTANCE',
+  };
+  const response = await googleFetch('https://places.googleapis.com/v1/places:searchNearby', `searchNearby(${category}@${radius}m)`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': apiKey,
+      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.types',
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json() as { places?: GooglePlaceResult[]; error?: { message?: string } };
+  if (!response.ok) {
+    const err = new Error(data.error?.message || 'Google Places Nearby error') as Error & { status: number };
+    err.status = response.status;
+    throw err;
+  }
+  return (data.places || []).map((p: GooglePlaceResult): NearbyResult => {
+    const pLat = p.location?.latitude ?? null;
+    const pLng = p.location?.longitude ?? null;
+    const dist = pLat != null && pLng != null ? Math.round(haversineMeters(lat, lng, pLat, pLng)) : null;
+    return {
+      google_place_id: p.id,
+      osm_id: null,
+      name: p.displayName?.text || '',
+      address: p.formattedAddress || '',
+      lat: pLat,
+      lng: pLng,
+      rating: p.rating ?? null,
+      distance_m: dist,
+      types: p.types || [],
+      source: 'google',
+    };
+  });
+}
+
+async function searchNearbyOverpass(
+  lat: number,
+  lng: number,
+  category: NearbyCategoryKey,
+  radius: number,
+): Promise<NearbyResult[]> {
+  const filters = NEARBY_CATEGORY_MAP[category].overpass;
+  // Build a union of node|way|relation queries for each filter
+  const parts: string[] = [];
+  for (const filter of filters) {
+    parts.push(`node${filter}(around:${radius},${lat},${lng});`);
+    parts.push(`way${filter}(around:${radius},${lat},${lng});`);
+    parts.push(`relation${filter}(around:${radius},${lat},${lng});`);
+  }
+  const query = `[out:json][timeout:10];(${parts.join('')});out center tags 30;`;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `data=${encodeURIComponent(query)}`,
+    });
+    if (!res.ok) {
+      const err = new Error(`Overpass API error: ${res.status}`) as Error & { status: number };
+      err.status = res.status >= 500 ? 502 : res.status;
+      throw err;
+    }
+    const data = await res.json() as {
+      elements?: {
+        type: string;
+        id: number;
+        lat?: number;
+        lon?: number;
+        center?: { lat: number; lon: number };
+        tags?: Record<string, string>;
+      }[];
+    };
+    const results: NearbyResult[] = [];
+    for (const el of data.elements || []) {
+      const eLat = el.lat ?? el.center?.lat ?? null;
+      const eLng = el.lon ?? el.center?.lon ?? null;
+      if (eLat == null || eLng == null) continue;
+      const tags = el.tags || {};
+      const name = tags.name || tags['name:en'] || '';
+      if (!name) continue;
+      const addressParts = [tags['addr:street'], tags['addr:housenumber'], tags['addr:city']].filter(Boolean).join(' ');
+      const dist = Math.round(haversineMeters(lat, lng, eLat, eLng));
+      results.push({
+        google_place_id: null,
+        osm_id: `${el.type}:${el.id}`,
+        name,
+        address: addressParts,
+        lat: eLat,
+        lng: eLng,
+        rating: null,
+        distance_m: dist,
+        types: [],
+        source: 'openstreetmap',
+      });
+    }
+    results.sort((a, b) => (a.distance_m ?? 0) - (b.distance_m ?? 0));
+    return results.slice(0, 30);
+  } catch (err) {
+    if ((err as { status?: number }).status) throw err;
+    const wrapped = new Error('Overpass API request failed') as Error & { status: number };
+    wrapped.status = 502;
+    throw wrapped;
+  }
+}
+
+export async function searchNearby(
+  userId: number,
+  lat: number,
+  lng: number,
+  category: NearbyCategoryKey,
+  lang?: string,
+): Promise<{ results: NearbyResult[]; source: 'google' | 'openstreetmap'; radius_m: number }> {
+  const apiKey = getMapsKey(userId);
+  const radii = [500, 2000];
+  const minResults = 5;
+  let lastResults: NearbyResult[] = [];
+  let lastSource: 'google' | 'openstreetmap' = apiKey ? 'google' : 'openstreetmap';
+  let googleFailed = false;
+
+  for (let i = 0; i < radii.length; i++) {
+    const radius = radii[i];
+    const isLast = i === radii.length - 1;
+    try {
+      const results = apiKey && !googleFailed
+        ? await searchNearbyGoogle(apiKey, lat, lng, category, radius, lang)
+        : await searchNearbyOverpass(lat, lng, category, radius);
+      lastResults = results;
+      lastSource = apiKey && !googleFailed ? 'google' : 'openstreetmap';
+      if (results.length >= minResults || isLast) {
+        return { results, source: lastSource, radius_m: radius };
+      }
+    } catch (err) {
+      console.error(`searchNearby (${apiKey && !googleFailed ? 'google' : 'overpass'}) failed at ${radius}m:`, err);
+      // Google failure → switch permanently to Overpass for remaining retries
+      if (apiKey && !googleFailed) {
+        googleFailed = true;
+        try {
+          const results = await searchNearbyOverpass(lat, lng, category, radius);
+          lastResults = results;
+          lastSource = 'openstreetmap';
+          if (results.length >= minResults || isLast) {
+            return { results, source: 'openstreetmap', radius_m: radius };
+          }
+        } catch (fallbackErr) {
+          console.error('Overpass fallback also failed:', fallbackErr);
+          if (isLast) throw fallbackErr;
+        }
+      } else if (isLast) {
+        throw err;
+      }
+    }
+  }
+  return { results: lastResults, source: lastSource, radius_m: radii[radii.length - 1] };
 }
 
 // ── Autocomplete (Google or Nominatim fallback) ─────────────────────────────

@@ -63,7 +63,17 @@ interface PlaceFormModalProps {
   onClose: () => void
   onSave: (data: PlaceFormData, files?: File[]) => Promise<void> | void
   place: Place | null
-  prefillCoords?: { lat: number; lng: number; name?: string; address?: string } | null
+  prefillCoords?: {
+    lat: number
+    lng: number
+    name?: string
+    address?: string
+    google_place_id?: string | null
+    osm_id?: string | null
+    category_id?: number | null
+    website?: string | null
+    phone?: string | null
+  } | null
   tripId: number
   categories: Category[]
   onCategoryCreated: (category: Category) => void
@@ -117,6 +127,11 @@ export default function PlaceFormModal({
         lng: String(prefillCoords.lng),
         name: prefillCoords.name || '',
         address: prefillCoords.address || '',
+        category_id: prefillCoords.category_id != null ? String(prefillCoords.category_id) : '',
+        website: prefillCoords.website || '',
+        ...(prefillCoords.google_place_id ? { google_place_id: prefillCoords.google_place_id } : {}),
+        ...(prefillCoords.osm_id ? { osm_id: prefillCoords.osm_id } : {}),
+        ...(prefillCoords.phone ? { phone: prefillCoords.phone } : {}),
       })
     } else {
       setForm(DEFAULT_FORM)
